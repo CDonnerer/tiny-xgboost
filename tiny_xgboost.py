@@ -21,10 +21,6 @@ def find_best_split(X, grad, hess, lambd, gamma):
     hess_sum = np.sum(hess)
 
     best_gain = 0.0
-    best_feature_id = None
-    best_val = None
-    best_left_instance_ids = None
-    best_right_instance_ids = None
 
     for feature_id in range(X.shape[1]):
         f_unique_sorted, idx = np.unique(X[:, feature_id], return_inverse=True)
@@ -55,19 +51,18 @@ def find_best_split(X, grad, hess, lambd, gamma):
             # XGB seems to put the split midway between points
             best_val = 0.5 * (f_unique_sorted[split_id] + f_unique_sorted[split_id + 1])
             below_split = X[:, feature_id] < best_val
-            best_left_instance_ids = np.flatnonzero(below_split)
-            best_right_instance_ids = np.flatnonzero(~below_split)
+            best_left_ids = np.flatnonzero(below_split)
+            best_right_ids = np.flatnonzero(~below_split)
 
     if best_gain <= 0.0:
-        # stop if we can't find a good split
-        return None
+        return None # stop if we can't find a good split
     else:
         return SplitPoint(
             gain=best_gain,
             feature_id=best_feature_id,
             feature_value=best_val,
-            left_ids=best_left_instance_ids,
-            right_ids=best_right_instance_ids,
+            left_ids=best_left_ids,
+            right_ids=best_right_ids,
         )
 
 
