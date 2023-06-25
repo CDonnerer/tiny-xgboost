@@ -34,7 +34,7 @@ def find_best_split(X, grad, hess, lambd, gamma):
             + np.square(grad_right_cumsum) / (hess_right_cumsum + lambd)
             - np.square(grad_sum) / (hess_sum + lambd)
             - gamma
-            - 1e-3  # TODO: seem to need a relatively large fudge factor?
+            - 1e-3  # TODO: seems to need a relatively large fudge factor?
         )
 
         split_id = all_split_gains.argmax()
@@ -43,12 +43,11 @@ def find_best_split(X, grad, hess, lambd, gamma):
         if current_gain > best_gain:
             best_gain = current_gain
             best_feature_id = feature_id
-            # XGB seems to put the split midway between points?
+            # XGB seems to put the split midway between points
             best_val = 0.5 * (f_unique_sorted[split_id] + f_unique_sorted[split_id + 1])
-            # TODO: can probably do the below quicker based on ids we have?
             below_split = X[:, feature_id] < best_val
-            best_left_instance_ids = np.argwhere(below_split).flatten()
-            best_right_instance_ids = np.argwhere(~below_split).flatten()
+            best_left_instance_ids = np.flatnonzero(below_split)
+            best_right_instance_ids = np.flatnonzero(~below_split)
 
     if best_gain <= 0.0:
         # stop if we can't find a good split
@@ -126,8 +125,8 @@ class Node:
             return np.full(X.shape[0], self.weight, dtype="float32")
         else:
             below_split = X[:, self.feature_id] < self.split_val
-            left_ids = np.argwhere(below_split).flatten()
-            right_ids = np.argwhere(~below_split).flatten()
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
 
             left_preds = self.left_child.predict(X[left_ids, :])
             right_preds = self.right_child.predict(X[right_ids, :])
@@ -157,7 +156,7 @@ class Tree:
     def __init__(self):
         self._root = Node()
 
-    def boost(self,*, X, grad, hess, params):
+    def boost(self, *, X, grad, hess, params):
         self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params)
 
     def predict(self, X):
@@ -175,14 +174,14 @@ class SquaredError:
 
     def loss(self, y, preds):
         return np.sqrt(np.mean(np.square(y - preds)))  # RMSE for consistency with xgb
-    
-_objectives = {
-    "reg:squarederror": SquaredError
-}
+
+
+_objectives = {"reg:squarederror": SquaredError}
+
 
 @dataclass
 class XGBParams:
-    objective : str = "reg:squarederror"
+    objective: str = "reg:squarederror"
     gamma: float = 0.0
     reg_lambda: float = 1.0
     max_depth: int = 3
@@ -206,15 +205,17 @@ class TinyXGBRegressor:
         X = X.astype("float32", copy=False)
         y = y.astype("float32", copy=False)
 
-        predictions =  np.full(len(y), self.params.base_score, dtype="float32")
+        predictions = np.full(len(y), self.params.base_score, dtype="float32")
         # TODO: this will break if no eval_set is provided
-        eval_predictions =  np.full(len(eval_set[1]), self.params.base_score, dtype="float32")
-  
+        eval_predictions = np.full(
+            len(eval_set[1]), self.params.base_score, dtype="float32"
+        )
+
         for ii in range(self.params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
             tree = Tree()
-            tree.boost(X, grad, hess, self.params)
+            tree.boost(X=X, grad=grad, hess=hess, params=self.params)
             self.trees.append(tree)
 
             predictions += self.predict(
