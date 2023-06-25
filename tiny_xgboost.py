@@ -84,10 +84,6 @@ class Node:
         self.split_point = None
         self.left_child = None
         self.right_child = None
-        # self.feature_id = None
-        # self.split_val = None
-        # self.best_gain = None
-        #
 
     def split(self, *, X, grad, hess, depth, params):
         if depth == params.max_depth:
