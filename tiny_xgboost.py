@@ -55,7 +55,7 @@ def find_best_split(X, grad, hess, lambd, gamma):
             best_right_ids = np.flatnonzero(~below_split)
 
     if best_gain <= 0.0:
-        return None # stop if we can't find a good split
+        return None  # stop if we can't find a good split
     else:
         return SplitPoint(
             gain=best_gain,
