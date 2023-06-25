@@ -4,8 +4,9 @@ A tiny xgboost implementation in Python & numpy.
 
 ## Benchmarking
 
-Benchmarking against xgboost shows we can get identical results in terms of test set
-scores and individual trees grown, but tiny-xgboost can easily by 5-10x slower.
+Benchmarking against xgboost shows that we can get identical results in terms of 
+test set RMSE and structure of individual trees grown. However, tiny-xgboost can 
+easily be 5-10x slower.
 
 Results from running `benchmark.py`:
 
