@@ -7,6 +7,15 @@ from dataclasses import dataclass
 import numpy as np
 
 
+@dataclass
+class SplitPoint:
+    gain: float = None
+    feature_id: int = None
+    feature_value: float = None
+    left_ids: np.ndarray = None
+    right_ids: np.ndarray = None
+
+
 def find_best_split(X, grad, hess, lambd, gamma):
     grad_sum = np.sum(grad)
     hess_sum = np.sum(hess)
@@ -51,14 +60,14 @@ def find_best_split(X, grad, hess, lambd, gamma):
 
     if best_gain <= 0.0:
         # stop if we can't find a good split
-        return None, None, None, None, None
+        return None
     else:
-        return (
-            best_gain,
-            best_feature_id,
-            best_val,
-            best_left_instance_ids,
-            best_right_instance_ids,
+        return SplitPoint(
+            gain=best_gain,
+            feature_id=best_feature_id,
+            feature_value=best_val,
+            left_ids=best_left_instance_ids,
+            right_ids=best_right_instance_ids,
         )
 
 
@@ -69,47 +78,48 @@ def calc_leaf_weight(grad, hess, lambd):
 class Node:
     def __init__(self):
         self.is_leaf = False
+        self.weight = None
+        self.cover = None
+
+        self.split_point = None
         self.left_child = None
         self.right_child = None
-        self.feature_id = None
-        self.split_val = None
-        self.weight = None
-        self.best_gain = None
-        self.cover = None
+        # self.feature_id = None
+        # self.split_val = None
+        # self.best_gain = None
+        #
 
     def split(self, *, X, grad, hess, depth, params):
         if depth == params.max_depth:
             self._set_leaf_node(grad=grad, hess=hess, params=params)
             return
 
-        gain, feature_id, split_val, left_ids, right_ids = find_best_split(
+        split_point = find_best_split(
             X=X, grad=grad, hess=hess, lambd=params.reg_lambda, gamma=params.gamma
         )
-        if gain is None:
+        if split_point is None:
             # We get here when no split produced an increase in gain
             self._set_leaf_node(grad=grad, hess=hess, params=params)
             return
 
         else:
-            self.feature_id = feature_id
-            self.split_val = split_val
+            self.split_point = split_point
             self.cover = len(grad)
-            self.gain = gain
 
             self.left_child = Node()
             self.left_child.split(
-                X=X[left_ids],
-                grad=grad[left_ids],
-                hess=hess[left_ids],
+                X=X[self.split_point.left_ids],
+                grad=grad[self.split_point.left_ids],
+                hess=hess[self.split_point.left_ids],
                 depth=depth + 1,
                 params=params,
             )
 
             self.right_child = Node()
             self.right_child.split(
-                X=X[right_ids],
-                grad=grad[right_ids],
-                hess=hess[right_ids],
+                X=X[self.split_point.right_ids],
+                grad=grad[self.split_point.right_ids],
+                hess=hess[self.split_point.right_ids],
                 depth=depth + 1,
                 params=params,
             )
@@ -124,7 +134,9 @@ class Node:
         if self.is_leaf:
             return np.full(X.shape[0], self.weight, dtype="float32")
         else:
-            below_split = X[:, self.feature_id] < self.split_val
+            below_split = (
+                X[:, self.split_point.feature_id] < self.split_point.feature_value
+            )
             left_ids = np.flatnonzero(below_split)
             right_ids = np.flatnonzero(~below_split)
 
@@ -144,8 +156,9 @@ class Node:
             return out_str
         else:
             out_str = (
-                f"{indent}[f{self.feature_id}<{self.split_val:.5f}] "
-                f"gain={self.gain:.5f},cover={self.cover}\n"
+                f"{indent}[f{self.split_point.feature_id}"
+                f"<{self.split_point.feature_value:.5f}] "
+                f"gain={self.split_point.gain:.5f},cover={self.cover}\n"
             )
             out_str += self.left_child.get_dump(depth=depth + 1)
             out_str += self.right_child.get_dump(depth=depth + 1)
