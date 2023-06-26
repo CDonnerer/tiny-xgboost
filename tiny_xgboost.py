@@ -49,7 +49,7 @@ def find_best_split(X, grad, hess, lambd, gamma):
             best_gain = current_gain
             best_feature_id = feature_id
             # XGB seems to put the split midway between points
-            best_val = np.mean(f_unique_sorted[split_id: split_id + 2])
+            best_val = np.mean(f_unique_sorted[split_id : split_id + 2])
             below_split = X[:, feature_id] < best_val
             best_left_ids = np.flatnonzero(below_split)
             best_right_ids = np.flatnonzero(~below_split)
