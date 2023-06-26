@@ -49,7 +49,7 @@ def find_best_split(X, grad, hess, lambd, gamma):
             best_gain = current_gain
             best_feature_id = feature_id
             # XGB seems to put the split midway between points
-            best_val = 0.5 * (f_unique_sorted[split_id] + f_unique_sorted[split_id + 1])
+            best_val = np.mean(f_unique_sorted[split_id: split_id + 2])
             below_split = X[:, feature_id] < best_val
             best_left_ids = np.flatnonzero(below_split)
             best_right_ids = np.flatnonzero(~below_split)
@@ -198,12 +198,13 @@ class XGBParams:
 class TinyXGBRegressor:
     def __init__(self, **params):
         self.params = XGBParams(**params)
-        self.best_iteration = None
         self.objective = _objectives[self.params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
         self.trees = []
+        # TODO: only set those if eval loss
         self.best_val_loss = np.finfo("float32").max
+        self.best_iteration = None
 
         # internally, we are in float32 world
         X = X.astype("float32", copy=False)
