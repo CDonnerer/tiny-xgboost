@@ -53,24 +53,21 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
             # XGB seems to put the split midway between points
             best_val = np.mean(f_unique_sorted[split_id : split_id + 2])
             below_split = X[:, feature_id] < best_val
-            best_left_ids = np.flatnonzero(below_split)
-            best_right_ids = np.flatnonzero(~below_split)
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
 
     if best_gain <= KRT_EPS:
         return None  # stop if we can't find a good split
-    elif (len(best_left_ids) < min_child_weight) or (
-        len(best_right_ids) < min_child_weight
-    ):
-        print("hello!")
-        # todo: this works for reg sqd error, not in general
+    elif (len(left_ids) < min_child_weight) or (len(right_ids) < min_child_weight):
+        # TODO: this works for reg sqd error, not in general
         return None
     else:
         return SplitPoint(
             gain=best_gain,
             feature_id=best_feature_id,
             feature_value=best_val,
-            left_ids=best_left_ids,
-            right_ids=best_right_ids,
+            left_ids=left_ids,
+            right_ids=right_ids,
         )
 
 
@@ -266,7 +263,7 @@ class TinyXGBRegressor:
         predictions = np.sum(
             [
                 tree.predict(X)
-                for tree in reversed(self.trees[iteration_range[0] : iteration_range[1]])
+                for tree in self.trees[iteration_range[0] : iteration_range[1]]
             ],
             axis=0,
         )
