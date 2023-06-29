@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# The 'official' xgboost fudge factor
+# https://github.com/dmlc/xgboost/blob/master/include/xgboost/base.h#L315
+KRT_EPS = np.float64(1e-6)
+
 
 @dataclass
 class SplitPoint:
@@ -16,7 +20,7 @@ class SplitPoint:
     right_ids: np.ndarray = None
 
 
-def find_best_split(X, grad, hess, lambd, gamma):
+def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
     grad_sum = np.sum(grad)
     hess_sum = np.sum(hess)
 
@@ -39,9 +43,7 @@ def find_best_split(X, grad, hess, lambd, gamma):
             + np.square(grad_right_cumsum) / (hess_right_cumsum + lambd)
             - np.square(grad_sum) / (hess_sum + lambd)
             - gamma
-            - 1e-3  # TODO: seems to need a relatively large fudge factor?
         )
-
         split_id = all_split_gains.argmax()
         current_gain = all_split_gains[split_id]
 
@@ -54,8 +56,14 @@ def find_best_split(X, grad, hess, lambd, gamma):
             best_left_ids = np.flatnonzero(below_split)
             best_right_ids = np.flatnonzero(~below_split)
 
-    if best_gain <= 0.0:
+    if best_gain <= KRT_EPS:
         return None  # stop if we can't find a good split
+    elif (len(best_left_ids) < min_child_weight) or (
+        len(best_right_ids) < min_child_weight
+    ):
+        print("hello!")
+        # todo: this works for reg sqd error, not in general
+        return None
     else:
         return SplitPoint(
             gain=best_gain,
@@ -86,7 +94,12 @@ class Node:
             return
 
         split_point = find_best_split(
-            X=X, grad=grad, hess=hess, lambd=params.reg_lambda, gamma=params.gamma
+            X=X,
+            grad=grad,
+            hess=hess,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
         )
         if split_point is None:
             # We get here when no split produced an increase in gain
@@ -123,7 +136,7 @@ class Node:
 
     def predict(self, X):
         if self.is_leaf:
-            return np.full(X.shape[0], self.weight, dtype="float32")
+            return np.full(X.shape[0], self.weight, dtype="float64")
         else:
             below_split = (
                 X[:, self.split_point.feature_id] < self.split_point.feature_value
@@ -134,7 +147,7 @@ class Node:
             left_preds = self.left_child.predict(X[left_ids, :])
             right_preds = self.right_child.predict(X[right_ids, :])
 
-            preds = np.zeros(shape=X.shape[0], dtype="float32")
+            preds = np.zeros(shape=X.shape[0], dtype="float64")
             preds[left_ids] = left_preds
             preds[right_ids] = right_preds
             return preds
@@ -173,7 +186,7 @@ class Tree:
 class SquaredError:
     def gradient_and_hessian(self, y, preds):
         grad = preds - y
-        hess = np.full(len(y), 1.0, dtype="float32")
+        hess = np.full(len(y), 1.0, dtype="float64")
         return grad, hess
 
     def loss(self, y, preds):
@@ -193,6 +206,7 @@ class XGBParams:
     n_estimators: int = 100
     early_stopping_rounds: int = 10
     base_score: float = 0.5
+    min_child_weight: float = 1.0
 
 
 class TinyXGBRegressor:
@@ -203,18 +217,15 @@ class TinyXGBRegressor:
     def fit(self, X, y, *, eval_set=None, verbose=True):
         self.trees = []
         # TODO: only set those if eval loss
-        self.best_val_loss = np.finfo("float32").max
+        self.best_val_loss = np.finfo("float64").max
         self.best_iteration = None
 
-        # internally, we are in float32 world
-        X = X.astype("float32", copy=False)
-        y = y.astype("float32", copy=False)
+        X, y = self._ensure_float64(X, y)
+        X_val, y_val = self._ensure_float64(eval_set[0], eval_set[1])
 
-        predictions = np.full(len(y), self.params.base_score, dtype="float32")
+        predictions = np.full(len(y), self.params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
-        eval_predictions = np.full(
-            len(eval_set[1]), self.params.base_score, dtype="float32"
-        )
+        eval_predictions = np.full(len(y_val), self.params.base_score, dtype="float64")
 
         for ii in range(self.params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
@@ -229,9 +240,9 @@ class TinyXGBRegressor:
 
             train_loss = self.objective.loss(y, predictions)
             eval_predictions += self.predict(
-                eval_set[0], iteration_range=(ii, ii + 1), include_base_score=False
+                X_val, iteration_range=(ii, ii + 1), include_base_score=False
             )
-            val_loss = self.objective.loss(eval_set[1], eval_predictions)
+            val_loss = self.objective.loss(y_val, eval_predictions)
 
             if verbose:
                 print(f"[{ii}]\ttrain-loss={train_loss:.5f}, val-loss={val_loss:.5f}")
@@ -244,7 +255,7 @@ class TinyXGBRegressor:
                 break
 
     def predict(self, X, iteration_range=None, include_base_score=True):
-        X = X.astype("float32", copy=False)
+        X = self._ensure_float64(X)
 
         if iteration_range is None:
             if self.best_iteration:
@@ -255,10 +266,16 @@ class TinyXGBRegressor:
         predictions = np.sum(
             [
                 tree.predict(X)
-                for tree in self.trees[iteration_range[0] : iteration_range[1]]
+                for tree in reversed(self.trees[iteration_range[0] : iteration_range[1]])
             ],
             axis=0,
         )
         if include_base_score:
             predictions += self.params.base_score
         return predictions
+
+    def _ensure_float64(self, *args):
+        if len(args) == 1:
+            return args[0].astype("float64")
+        else:
+            return tuple(arg.astype("float64") for arg in args)
