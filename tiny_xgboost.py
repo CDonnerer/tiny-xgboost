@@ -44,6 +44,13 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
             - np.square(grad_sum) / (hess_sum + lambd)
             - gamma
         )
+
+        # Null out any gains that would results in leaves below min_child_weight
+        below_min_child_weight = (
+            (hess_left_cumsum < min_child_weight) | (hess_right_cumsum < min_child_weight)
+        )
+        all_split_gains[below_min_child_weight] = 0.0
+
         split_id = all_split_gains.argmax()
         current_gain = all_split_gains[split_id]
 
@@ -58,9 +65,6 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
 
     if best_gain <= KRT_EPS:
         return None  # stop if we can't find a good split
-    elif (len(left_ids) < min_child_weight) or (len(right_ids) < min_child_weight):
-        # TODO: this works for reg sqd error, not in general
-        return None
     else:
         return SplitPoint(
             gain=best_gain,
