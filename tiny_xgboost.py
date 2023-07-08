@@ -208,6 +208,7 @@ class XGBParams:
     early_stopping_rounds: int = 10
     base_score: float = 0.5
     min_child_weight: float = 1.0
+    tree_method: str = "exact"
 
 
 class TinyXGBRegressor:
