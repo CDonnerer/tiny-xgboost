@@ -1,3 +1,5 @@
+import pytest
+
 import numpy as np
 from xgboost import XGBRegressor
 from sklearn.datasets import make_regression
@@ -5,9 +7,10 @@ from sklearn.datasets import make_regression
 from tiny_xgboost import TinyXGBRegressor
 
 
-def test_tiny_xgboost_regression():
+@pytest.mark.parametrize("n_targets", [1, 2, 3])
+def test_tiny_xgboost_regression(n_targets):
     X, y = make_regression(
-        n_samples=100, n_features=10, n_informative=5, n_targets=1, random_state=12
+        n_samples=100, n_features=10, n_informative=5, n_targets=n_targets, random_state=12
     )
 
     learner_params = {

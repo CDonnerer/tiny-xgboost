@@ -187,7 +187,7 @@ class Tree:
 class SquaredError:
     def gradient_and_hessian(self, y, preds):
         grad = preds - y
-        hess = np.full(len(y), 1.0, dtype="float64")
+        hess = np.full(y.shape, 1.0, dtype="float64")
         return grad, hess
 
     def loss(self, y, preds):
@@ -208,7 +208,28 @@ class XGBParams:
     early_stopping_rounds: int = 10
     base_score: float = 0.5
     min_child_weight: float = 1.0
-    tree_method: str = "exact"  # this is actually the only option for now
+    tree_method: str = "exact"
+    multi_strategy: str = "one_output_per_tree"
+    num_outputs: int = 1
+
+    def __post_init__(self):
+        assert self.objective in _objectives.keys()
+        assert self.tree_method == "exact"
+        assert self.multi_strategy in ("one_output_per_tree", "multi_output_tree")
+
+
+# class Booster:
+
+
+#     def update():
+
+
+# def train(X, y, params, evals, verbose_eval):
+
+def _reshape_2d(x):
+    if len(x.shape) == 1:
+        x = x.reshape(-1, 1)
+    return x
 
 
 class TinyXGBRegressor:
@@ -217,32 +238,41 @@ class TinyXGBRegressor:
         self.objective = _objectives[self.params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
-        self.trees = []
+
         # TODO: only set those if eval loss
         self.best_val_loss = np.finfo("float64").max
         self.best_iteration = None
 
+
         X, y = self._ensure_float64(X, y)
         X_val, y_val = self._ensure_float64(eval_set[0], eval_set[1])
 
-        predictions = np.full(len(y), self.params.base_score, dtype="float64")
+        y = _reshape_2d(y)
+        y_val = _reshape_2d(y_val)
+
+        self.num_outputs = y.shape[1]
+
+        predictions = np.full(y.shape, self.params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
-        eval_predictions = np.full(len(y_val), self.params.base_score, dtype="float64")
+        eval_predictions = np.full(y_val.shape, self.params.base_score, dtype="float64")
+
+        self.trees = [[] for ii in range(self.num_outputs)]
 
         for ii in range(self.params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
-            tree = Tree()
-            tree.boost(X=X, grad=grad, hess=hess, params=self.params)
-            self.trees.append(tree)
+            for jj in range(self.num_outputs):
+                tree = Tree()
+                tree.boost(X=X, grad=grad[:, jj], hess=hess[:, jj], params=self.params)
+                self.trees[jj].append(tree)
 
             predictions += self.predict(
-                X, iteration_range=(ii, ii + 1), include_base_score=False
+                X, iteration_range=(ii, ii + 1), include_base_score=False, training=True
             )
 
             train_loss = self.objective.loss(y, predictions)
             eval_predictions += self.predict(
-                X_val, iteration_range=(ii, ii + 1), include_base_score=False
+                X_val, iteration_range=(ii, ii + 1), include_base_score=False, training=True
             )
             val_loss = self.objective.loss(y_val, eval_predictions)
 
@@ -256,7 +286,7 @@ class TinyXGBRegressor:
             if (ii - self.best_iteration) >= self.params.early_stopping_rounds:
                 break
 
-    def predict(self, X, iteration_range=None, include_base_score=True):
+    def predict(self, X, iteration_range=None, include_base_score=True, training=False):
         X = self._ensure_float64(X)
 
         if iteration_range is None:
@@ -265,16 +295,23 @@ class TinyXGBRegressor:
             else:
                 iteration_range = (0, len(self.trees))
 
-        predictions = np.sum(
+        predictions = np.array([np.sum(
             [
                 tree.predict(X)
-                for tree in self.trees[iteration_range[0] : iteration_range[1]]
+                for tree in self.trees[jj][iteration_range[0] : iteration_range[1]]
             ],
             axis=0,
         )
+            for jj in range(self.num_outputs)
+        ]).T
         if include_base_score:
             predictions += self.params.base_score
-        return predictions
+
+        if not training:
+            predictions = predictions.squeeze()
+        return predictions 
+    
+    #.squeeze()
 
     def _ensure_float64(self, *args):
         if len(args) == 1:
