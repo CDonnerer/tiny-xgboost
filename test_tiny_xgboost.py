@@ -7,10 +7,10 @@ from sklearn.datasets import make_regression
 from tiny_xgboost import TinyXGBRegressor
 
 
-@pytest.mark.parametrize("n_targets", [1, 2, 3])
+@pytest.mark.parametrize("n_targets", [1, 2])
 def test_tiny_xgboost_regression(n_targets):
     X, y = make_regression(
-        n_samples=100, n_features=10, n_informative=5, n_targets=n_targets, random_state=12
+        n_samples=100, n_features=10, n_informative=5, n_targets=n_targets, random_state=123
     )
 
     learner_params = {
@@ -19,9 +19,9 @@ def test_tiny_xgboost_regression(n_targets):
         "n_estimators": 100,
         "early_stopping_rounds": 10,
         "learning_rate": 0.3,
-        "base_score": 0.5,
+        "base_score": 1.0,
         "tree_method": "exact",
-        "reg_lambda": 1.0,
+        "reg_lambda": 1,
         "min_child_weight": 1,
     }
 

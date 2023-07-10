@@ -49,7 +49,7 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
         below_min_child_weight = (hess_left_cumsum < min_child_weight) | (
             hess_right_cumsum < min_child_weight
         )
-        all_split_gains[below_min_child_weight] = 0.0
+        all_split_gains[below_min_child_weight] = np.float64(0.0)
 
         split_id = all_split_gains.argmax()
         current_gain = all_split_gains[split_id]
@@ -218,52 +218,49 @@ class XGBParams:
         assert self.multi_strategy in ("one_output_per_tree", "multi_output_tree")
 
 
-# class Booster:
-
-
-#     def update():
-
-
-# def train(X, y, params, evals, verbose_eval):
-
 def _reshape_2d(x):
     if len(x.shape) == 1:
         x = x.reshape(-1, 1)
     return x
 
 
-class TinyXGBRegressor:
-    def __init__(self, **params):
-        self.params = XGBParams(**params)
-        self.objective = _objectives[self.params.objective]()
+def _as_float64(*args):
+    if len(args) == 1:
+        return args[0].astype("float64")
+    else:
+        return tuple(arg.astype("float64") for arg in args)
+
+
+class Booster:
+    def __init__(self, params):
+        self._params = params
+        self.objective = _objectives[self._params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
-
         # TODO: only set those if eval loss
         self.best_val_loss = np.finfo("float64").max
         self.best_iteration = None
 
-
-        X, y = self._ensure_float64(X, y)
-        X_val, y_val = self._ensure_float64(eval_set[0], eval_set[1])
+        X, y = _as_float64(X, y)
+        X_val, y_val = _as_float64(eval_set[0], eval_set[1])
 
         y = _reshape_2d(y)
         y_val = _reshape_2d(y_val)
 
         self.num_outputs = y.shape[1]
 
-        predictions = np.full(y.shape, self.params.base_score, dtype="float64")
+        predictions = np.full(y.shape, self._params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
-        eval_predictions = np.full(y_val.shape, self.params.base_score, dtype="float64")
+        eval_predictions = np.full(y_val.shape, self._params.base_score, dtype="float64")
 
         self.trees = [[] for ii in range(self.num_outputs)]
 
-        for ii in range(self.params.n_estimators):
+        for ii in range(self._params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
             for jj in range(self.num_outputs):
                 tree = Tree()
-                tree.boost(X=X, grad=grad[:, jj], hess=hess[:, jj], params=self.params)
+                tree.boost(X=X, grad=grad[:, jj], hess=hess[:, jj], params=self._params)
                 self.trees[jj].append(tree)
 
             predictions += self.predict(
@@ -283,11 +280,13 @@ class TinyXGBRegressor:
                 self.best_val_loss = val_loss
                 self.best_iteration = ii
 
-            if (ii - self.best_iteration) >= self.params.early_stopping_rounds:
+            if (ii - self.best_iteration) >= self._params.early_stopping_rounds:
                 break
+        
+        return self
 
     def predict(self, X, iteration_range=None, include_base_score=True, training=False):
-        X = self._ensure_float64(X)
+        X = _as_float64(X)
 
         if iteration_range is None:
             if self.best_iteration:
@@ -304,17 +303,27 @@ class TinyXGBRegressor:
         )
             for jj in range(self.num_outputs)
         ]).T
+
         if include_base_score:
-            predictions += self.params.base_score
+            predictions += self._params.base_score
 
         if not training:
             predictions = predictions.squeeze()
-        return predictions 
-    
-    #.squeeze()
+        return predictions
 
-    def _ensure_float64(self, *args):
-        if len(args) == 1:
-            return args[0].astype("float64")
-        else:
-            return tuple(arg.astype("float64") for arg in args)
+
+
+
+
+class TinyXGBRegressor:
+    def __init__(self, **params):
+        self.params = XGBParams(**params)
+        self.objective = _objectives[self.params.objective]()
+
+    def fit(self, X, y, *, eval_set=None, verbose=True):
+        self._Booster = Booster(self.params).fit(X, y, eval_set=eval_set, verbose=verbose)
+        return self
+
+    def predict(self, *args, **kwargs):
+        return self._Booster.predict(*args, **kwargs)
+    
