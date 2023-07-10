@@ -79,7 +79,7 @@ def calc_leaf_weight(grad, hess, lambd):
     return -np.sum(grad) / (np.sum(hess) + lambd)
 
 
-class Node:
+class BaseNode:
     def __init__(self):
         self.is_leaf = False
         self.weight = None
@@ -94,14 +94,13 @@ class Node:
             self._set_leaf_node(grad=grad, hess=hess, params=params)
             return
 
-        split_point = find_best_split(
+        split_point = self._find_best_split(
             X=X,
             grad=grad,
             hess=hess,
-            lambd=params.reg_lambda,
-            gamma=params.gamma,
-            min_child_weight=params.min_child_weight,
+            params=params,
         )
+
         if split_point is None:
             # We get here when no split produced an increase in gain
             self._set_leaf_node(grad=grad, hess=hess, params=params)
@@ -111,7 +110,7 @@ class Node:
             self.split_point = split_point
             self.cover = len(grad)
 
-            self.left_child = Node()
+            self.left_child = self.__class__()
             self.left_child.split(
                 X=X[self.split_point.left_ids],
                 grad=grad[self.split_point.left_ids],
@@ -120,7 +119,7 @@ class Node:
                 params=params,
             )
 
-            self.right_child = Node()
+            self.right_child = self.__class__()
             self.right_child.split(
                 X=X[self.split_point.right_ids],
                 grad=grad[self.split_point.right_ids],
@@ -129,15 +128,16 @@ class Node:
                 params=params,
             )
 
+    def _find_best_split(self, X, grad, hess, params):
+        pass
+
     def _set_leaf_node(self, grad, hess, params):
-        self.is_leaf = True
-        self.cover = len(grad)
-        leaf_weight = calc_leaf_weight(grad, hess, params.reg_lambda)
-        self.weight = params.learning_rate * leaf_weight
+        pass
 
     def predict(self, X):
         if self.is_leaf:
-            return np.full(X.shape[0], self.weight, dtype="float64")
+            # below works for both scalar and array weight
+            return np.ones(X.shape[0], dtype="float64") * self.weight
         else:
             below_split = (
                 X[:, self.split_point.feature_id] < self.split_point.feature_value
@@ -170,9 +170,88 @@ class Node:
             return out_str
 
 
+class ScalarNode(BaseNode):
+    def _find_best_split(self, X, grad, hess, params):
+        return find_best_split(
+            X=X,
+            grad=grad,
+            hess=hess,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
+        )
+
+    def _set_leaf_node(self, grad, hess, params):
+        self.is_leaf = True
+        self.cover = len(grad)
+        leaf_weight = calc_leaf_weight(grad, hess, params.reg_lambda)
+        self.weight = params.learning_rate * leaf_weight
+
+
+class VectorNode(BaseNode):
+    def _find_best_split(self, X, grad, hess, params):
+        grad_output_summed = grad.sum(axis=1)
+        hess_output_summed = hess.sum(axis=1)
+
+        return find_best_split(
+            X=X,
+            grad=grad_output_summed,
+            hess=hess_output_summed,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
+        )
+
+    def _set_leaf_node(self, grad, hess, params):
+        self.is_leaf = True
+        self.cover = len(grad)
+
+        weights = []
+
+        for grad_output, hess_output in zip(grad.T, hess.T):
+            leaf_weight = calc_leaf_weight(grad_output, hess_output, params.reg_lambda)
+            weights.append(leaf_weight)
+
+        self.weight = params.learning_rate * np.array(weights).reshape(-1, 1)
+
+    def predict(self, X):
+
+        if self.is_leaf:
+            # below works for both scalar and array weight
+            return (np.ones(X.shape[0], dtype="float64") * self.weight).T
+        else:
+            below_split = (
+                X[:, self.split_point.feature_id] < self.split_point.feature_value
+            )
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
+
+            left_preds = self.left_child.predict(X[left_ids, :])
+            right_preds = self.right_child.predict(X[right_ids, :])
+
+            preds = np.zeros(shape=(X.shape[0], left_preds.shape[1]), dtype="float64")
+            preds[left_ids] = left_preds
+            preds[right_ids] = right_preds
+            return preds
+
+
 class Tree:
     def __init__(self):
-        self._root = Node()
+        self._root = ScalarNode()
+
+    def boost(self, *, X, grad, hess, params):
+        self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params)
+
+    def predict(self, X):
+        return self._root.predict(X)
+
+    def get_dump(self):
+        return self._root.get_dump(depth=0)
+
+
+class MultiOutputTree:
+    def __init__(self):
+        self._root = VectorNode()
 
     def boost(self, *, X, grad, hess, params):
         self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params)
@@ -251,17 +330,29 @@ class Booster:
 
         predictions = np.full(y.shape, self._params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
-        eval_predictions = np.full(y_val.shape, self._params.base_score, dtype="float64")
+        eval_predictions = np.full(
+            y_val.shape, self._params.base_score, dtype="float64"
+        )
 
-        self.trees = [[] for ii in range(self.num_outputs)]
+        if self._params.multi_strategy == "one_output_per_tree":
+            self.trees = [[] for ii in range(self.num_outputs)]
+        else:
+            self.trees = [[]]
 
         for ii in range(self._params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
-            for jj in range(self.num_outputs):
-                tree = Tree()
-                tree.boost(X=X, grad=grad[:, jj], hess=hess[:, jj], params=self._params)
-                self.trees[jj].append(tree)
+            if self._params.multi_strategy == "multi_output_tree":
+                tree = MultiOutputTree()
+                tree.boost(X=X, grad=grad, hess=hess, params=self._params)
+                self.trees[0].append(tree)
+            else:
+                for jj in range(self.num_outputs):
+                    tree = Tree()
+                    tree.boost(
+                        X=X, grad=grad[:, jj], hess=hess[:, jj], params=self._params
+                    )
+                    self.trees[jj].append(tree)
 
             predictions += self.predict(
                 X, iteration_range=(ii, ii + 1), include_base_score=False, training=True
@@ -269,7 +360,10 @@ class Booster:
 
             train_loss = self.objective.loss(y, predictions)
             eval_predictions += self.predict(
-                X_val, iteration_range=(ii, ii + 1), include_base_score=False, training=True
+                X_val,
+                iteration_range=(ii, ii + 1),
+                include_base_score=False,
+                training=True,
             )
             val_loss = self.objective.loss(y_val, eval_predictions)
 
@@ -282,7 +376,7 @@ class Booster:
 
             if (ii - self.best_iteration) >= self._params.early_stopping_rounds:
                 break
-        
+
         return self
 
     def predict(self, X, iteration_range=None, include_base_score=True, training=False):
@@ -294,15 +388,29 @@ class Booster:
             else:
                 iteration_range = (0, len(self.trees))
 
-        predictions = np.array([np.sum(
-            [
-                tree.predict(X)
-                for tree in self.trees[jj][iteration_range[0] : iteration_range[1]]
-            ],
-            axis=0,
-        )
-            for jj in range(self.num_outputs)
-        ]).T
+        if self._params.multi_strategy == "multi_output_tree":
+            predictions = np.sum(
+                [
+                    tree.predict(X)
+                    for tree in self.trees[0][iteration_range[0] : iteration_range[1]]
+                ],
+                axis=0,
+            )
+        else:
+            predictions = np.array(
+                [
+                    np.sum(
+                        [
+                            tree.predict(X)
+                            for tree in self.trees[jj][
+                                iteration_range[0] : iteration_range[1]
+                            ]
+                        ],
+                        axis=0,
+                    )
+                    for jj in range(self.num_outputs)
+                ]
+            ).T
 
         if include_base_score:
             predictions += self._params.base_score
@@ -312,18 +420,16 @@ class Booster:
         return predictions
 
 
-
-
-
 class TinyXGBRegressor:
     def __init__(self, **params):
         self.params = XGBParams(**params)
         self.objective = _objectives[self.params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
-        self._Booster = Booster(self.params).fit(X, y, eval_set=eval_set, verbose=verbose)
+        self._Booster = Booster(self.params).fit(
+            X, y, eval_set=eval_set, verbose=verbose
+        )
         return self
 
     def predict(self, *args, **kwargs):
         return self._Booster.predict(*args, **kwargs)
-    
