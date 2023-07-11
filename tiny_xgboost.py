@@ -135,23 +135,7 @@ class BaseNode:
         pass
 
     def predict(self, X):
-        if self.is_leaf:
-            # below works for both scalar and array weight
-            return np.ones(X.shape[0], dtype="float64") * self.weight
-        else:
-            below_split = (
-                X[:, self.split_point.feature_id] < self.split_point.feature_value
-            )
-            left_ids = np.flatnonzero(below_split)
-            right_ids = np.flatnonzero(~below_split)
-
-            left_preds = self.left_child.predict(X[left_ids, :])
-            right_preds = self.right_child.predict(X[right_ids, :])
-
-            preds = np.zeros(shape=X.shape[0], dtype="float64")
-            preds[left_ids] = left_preds
-            preds[right_ids] = right_preds
-            return preds
+        pass
 
     def get_dump(self, depth=0):
         indent = "\t" * depth
@@ -187,6 +171,24 @@ class ScalarNode(BaseNode):
         leaf_weight = calc_leaf_weight(grad, hess, params.reg_lambda)
         self.weight = params.learning_rate * leaf_weight
 
+    def predict(self, X):
+        if self.is_leaf:
+            return np.ones(X.shape[0], dtype="float64") * self.weight
+        else:
+            below_split = (
+                X[:, self.split_point.feature_id] < self.split_point.feature_value
+            )
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
+
+            left_preds = self.left_child.predict(X[left_ids, :])
+            right_preds = self.right_child.predict(X[right_ids, :])
+
+            preds = np.zeros(shape=X.shape[0], dtype="float64")
+            preds[left_ids] = left_preds
+            preds[right_ids] = right_preds
+            return preds
+
 
 class VectorNode(BaseNode):
     def _find_best_split(self, X, grad, hess, params):
@@ -202,6 +204,7 @@ class VectorNode(BaseNode):
             min_child_weight=params.min_child_weight,
         )
 
+
     def _set_leaf_node(self, grad, hess, params):
         self.is_leaf = True
         self.cover = len(grad)
@@ -215,9 +218,7 @@ class VectorNode(BaseNode):
         self.weight = params.learning_rate * np.array(weights).reshape(-1, 1)
 
     def predict(self, X):
-
         if self.is_leaf:
-            # below works for both scalar and array weight
             return (np.ones(X.shape[0], dtype="float64") * self.weight).T
         else:
             below_split = (
