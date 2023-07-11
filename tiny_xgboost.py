@@ -1,8 +1,7 @@
 """Tiny xgboost implementation in Python & numpy.
-
-Currently only supports reg:squarederror objective.
 """
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -79,7 +78,7 @@ def calc_leaf_weight(grad, hess, lambd):
     return -np.sum(grad) / (np.sum(hess) + lambd)
 
 
-class Node:
+class BaseNode:
     def __init__(self):
         self.is_leaf = False
         self.weight = None
@@ -94,14 +93,13 @@ class Node:
             self._set_leaf_node(grad=grad, hess=hess, params=params)
             return
 
-        split_point = find_best_split(
+        split_point = self._find_best_split(
             X=X,
             grad=grad,
             hess=hess,
-            lambd=params.reg_lambda,
-            gamma=params.gamma,
-            min_child_weight=params.min_child_weight,
+            params=params,
         )
+
         if split_point is None:
             # We get here when no split produced an increase in gain
             self._set_leaf_node(grad=grad, hess=hess, params=params)
@@ -111,7 +109,7 @@ class Node:
             self.split_point = split_point
             self.cover = len(grad)
 
-            self.left_child = Node()
+            self.left_child = self.__class__()
             self.left_child.split(
                 X=X[self.split_point.left_ids],
                 grad=grad[self.split_point.left_ids],
@@ -120,7 +118,7 @@ class Node:
                 params=params,
             )
 
-            self.right_child = Node()
+            self.right_child = self.__class__()
             self.right_child.split(
                 X=X[self.split_point.right_ids],
                 grad=grad[self.split_point.right_ids],
@@ -128,6 +126,43 @@ class Node:
                 depth=depth + 1,
                 params=params,
             )
+
+    def _find_best_split(self, X, grad, hess, params):
+        pass
+
+    def _set_leaf_node(self, grad, hess, params):
+        pass
+
+    def predict(self, X):
+        pass
+
+    def get_dump(self, depth=0):
+        indent = "\t" * depth
+
+        if self.is_leaf:
+            out_str = f"{indent}leaf={self.weight:.5f} cover={self.cover}\n"
+            return out_str
+        else:
+            out_str = (
+                f"{indent}[f{self.split_point.feature_id}"
+                f"<{self.split_point.feature_value:.5f}] "
+                f"gain={self.split_point.gain:.5f},cover={self.cover}\n"
+            )
+            out_str += self.left_child.get_dump(depth=depth + 1)
+            out_str += self.right_child.get_dump(depth=depth + 1)
+            return out_str
+
+
+class ScalarNode(BaseNode):
+    def _find_best_split(self, X, grad, hess, params):
+        return find_best_split(
+            X=X,
+            grad=grad,
+            hess=hess,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
+        )
 
     def _set_leaf_node(self, grad, hess, params):
         self.is_leaf = True
@@ -153,26 +188,55 @@ class Node:
             preds[right_ids] = right_preds
             return preds
 
-    def get_dump(self, depth=0):
-        indent = "\t" * depth
 
+class VectorNode(BaseNode):
+    def _find_best_split(self, X, grad, hess, params):
+        grad_output_mean = grad.mean(axis=1)
+        hess_output_mean = hess.mean(axis=1)
+
+        return find_best_split(
+            X=X,
+            grad=grad_output_mean,
+            hess=hess_output_mean,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
+        )
+
+    def _set_leaf_node(self, grad, hess, params):
+        self.is_leaf = True
+        self.cover = len(grad)
+
+        weights = []
+
+        for grad_output, hess_output in zip(grad.T, hess.T):
+            leaf_weight = calc_leaf_weight(grad_output, hess_output, params.reg_lambda)
+            weights.append(leaf_weight)
+
+        self.weight = params.learning_rate * np.array(weights).reshape(-1, 1)
+
+    def predict(self, X):
         if self.is_leaf:
-            out_str = f"{indent}leaf={self.weight:.5f} cover={self.cover}\n"
-            return out_str
+            return (np.ones(X.shape[0], dtype="float64") * self.weight).T
         else:
-            out_str = (
-                f"{indent}[f{self.split_point.feature_id}"
-                f"<{self.split_point.feature_value:.5f}] "
-                f"gain={self.split_point.gain:.5f},cover={self.cover}\n"
+            below_split = (
+                X[:, self.split_point.feature_id] < self.split_point.feature_value
             )
-            out_str += self.left_child.get_dump(depth=depth + 1)
-            out_str += self.right_child.get_dump(depth=depth + 1)
-            return out_str
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
+
+            left_preds = self.left_child.predict(X[left_ids, :])
+            right_preds = self.right_child.predict(X[right_ids, :])
+
+            preds = np.zeros(shape=(X.shape[0], left_preds.shape[1]), dtype="float64")
+            preds[left_ids] = left_preds
+            preds[right_ids] = right_preds
+            return preds
 
 
-class Tree:
+class BaseTree:
     def __init__(self):
-        self._root = Node()
+        self._root = None
 
     def boost(self, *, X, grad, hess, params):
         self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params)
@@ -184,10 +248,20 @@ class Tree:
         return self._root.get_dump(depth=0)
 
 
+class Tree(BaseTree):
+    def __init__(self):
+        self._root = ScalarNode()
+
+
+class MultiOutputTree(BaseTree):
+    def __init__(self):
+        self._root = VectorNode()
+
+
 class SquaredError:
     def gradient_and_hessian(self, y, preds):
         grad = preds - y
-        hess = np.full(len(y), 1.0, dtype="float64")
+        hess = np.full(y.shape, 1.0, dtype="float64")
         return grad, hess
 
     def loss(self, y, preds):
@@ -195,6 +269,11 @@ class SquaredError:
 
 
 _objectives = {"reg:squarederror": SquaredError}
+
+
+class MultiStrategy(str, Enum):
+    one_output_per_tree = "one_output_per_tree"
+    multi_output_tree = "multi_output_tree"
 
 
 @dataclass
@@ -208,41 +287,86 @@ class XGBParams:
     early_stopping_rounds: int = 10
     base_score: float = 0.5
     min_child_weight: float = 1.0
-    tree_method: str = "exact"  # this is actually the only option for now
+    tree_method: str = "exact"
+    multi_strategy: str = MultiStrategy.one_output_per_tree
+    num_outputs: int = 1
+
+    def __post_init__(self):
+        assert self.objective in _objectives.keys()
+        assert self.tree_method == "exact"
+        assert self.multi_strategy in MultiStrategy._member_names_
 
 
-class TinyXGBRegressor:
-    def __init__(self, **params):
-        self.params = XGBParams(**params)
-        self.objective = _objectives[self.params.objective]()
+def reshape_2d(x):
+    if len(x.shape) == 1:
+        x = x.reshape(-1, 1)
+    return x
+
+
+def as_float64(*args):
+    if len(args) == 1:
+        return args[0].astype("float64")
+    else:
+        return tuple(arg.astype("float64") for arg in args)
+
+
+class Booster:
+    def __init__(self, params):
+        self._params = params
+        self.objective = _objectives[self._params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
-        self.trees = []
         # TODO: only set those if eval loss
         self.best_val_loss = np.finfo("float64").max
         self.best_iteration = None
 
-        X, y = self._ensure_float64(X, y)
-        X_val, y_val = self._ensure_float64(eval_set[0], eval_set[1])
+        X, y = as_float64(X, y)
+        X_val, y_val = as_float64(eval_set[0], eval_set[1])
 
-        predictions = np.full(len(y), self.params.base_score, dtype="float64")
+        y = reshape_2d(y)
+        y_val = reshape_2d(y_val)
+
+        self.num_outputs = y.shape[1]
+
+        predictions = np.full(y.shape, self._params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
-        eval_predictions = np.full(len(y_val), self.params.base_score, dtype="float64")
+        eval_predictions = np.full(
+            y_val.shape, self._params.base_score, dtype="float64"
+        )
 
-        for ii in range(self.params.n_estimators):
+        if self._params.multi_strategy == MultiStrategy.multi_output_tree:
+            self.trees = [[]]
+        else:
+            self.trees = [[] for _ in range(self.num_outputs)]
+
+        for ii in range(self._params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
-            tree = Tree()
-            tree.boost(X=X, grad=grad, hess=hess, params=self.params)
-            self.trees.append(tree)
+            if self._params.multi_strategy == MultiStrategy.multi_output_tree:
+                tree = MultiOutputTree()
+                tree.boost(X=X, grad=grad, hess=hess, params=self._params)
+                self.trees[0].append(tree)
+            else:
+                for jj in range(self.num_outputs):
+                    tree = Tree()
+                    tree.boost(
+                        X=X, grad=grad[:, jj], hess=hess[:, jj], params=self._params
+                    )
+                    self.trees[jj].append(tree)
 
             predictions += self.predict(
-                X, iteration_range=(ii, ii + 1), include_base_score=False
+                X,
+                iteration_range=(ii, ii + 1),
+                include_base_score=False,
+                strict_shape=True,
             )
 
             train_loss = self.objective.loss(y, predictions)
             eval_predictions += self.predict(
-                X_val, iteration_range=(ii, ii + 1), include_base_score=False
+                X_val,
+                iteration_range=(ii, ii + 1),
+                include_base_score=False,
+                strict_shape=True,
             )
             val_loss = self.objective.loss(y_val, eval_predictions)
 
@@ -253,11 +377,15 @@ class TinyXGBRegressor:
                 self.best_val_loss = val_loss
                 self.best_iteration = ii
 
-            if (ii - self.best_iteration) >= self.params.early_stopping_rounds:
+            if (ii - self.best_iteration) >= self._params.early_stopping_rounds:
                 break
 
-    def predict(self, X, iteration_range=None, include_base_score=True):
-        X = self._ensure_float64(X)
+        return self
+
+    def predict(
+        self, X, iteration_range=None, include_base_score=True, strict_shape=False
+    ):
+        X = as_float64(X)
 
         if iteration_range is None:
             if self.best_iteration:
@@ -265,19 +393,45 @@ class TinyXGBRegressor:
             else:
                 iteration_range = (0, len(self.trees))
 
-        predictions = np.sum(
+        if self._params.multi_strategy == MultiStrategy.multi_output_tree:
+            predictions = self._predict_tree(
+                X=X, iteration_range=iteration_range, tree_id=0
+            )
+        else:
+            predictions = np.array(
+                [
+                    self._predict_tree(X=X, iteration_range=iteration_range, tree_id=jj)
+                    for jj in range(self.num_outputs)
+                ]
+            ).T
+
+        if include_base_score:
+            predictions += self._params.base_score
+
+        if not strict_shape:
+            predictions = predictions.squeeze()
+        return predictions
+
+    def _predict_tree(self, X, iteration_range, tree_id=0):
+        return np.sum(
             [
                 tree.predict(X)
-                for tree in self.trees[iteration_range[0] : iteration_range[1]]
+                for tree in self.trees[tree_id][iteration_range[0] : iteration_range[1]]
             ],
             axis=0,
         )
-        if include_base_score:
-            predictions += self.params.base_score
-        return predictions
 
-    def _ensure_float64(self, *args):
-        if len(args) == 1:
-            return args[0].astype("float64")
-        else:
-            return tuple(arg.astype("float64") for arg in args)
+
+class TinyXGBRegressor:
+    def __init__(self, **params):
+        self.params = XGBParams(**params)
+        self.objective = _objectives[self.params.objective]()
+
+    def fit(self, X, y, *, eval_set=None, verbose=True):
+        self._Booster = Booster(self.params).fit(
+            X, y, eval_set=eval_set, verbose=verbose
+        )
+        return self
+
+    def predict(self, *args, **kwargs):
+        return self._Booster.predict(*args, **kwargs)
