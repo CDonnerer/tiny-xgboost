@@ -8,7 +8,6 @@ from sklearn.model_selection import train_test_split
 from tiny_xgboost import TinyXGBRegressor
 
 
-@pytest.mark.skip
 @pytest.mark.parametrize("n_targets", [1, 2])
 def test_tiny_xgboost_regression(n_targets):
     X, y = make_regression(
@@ -25,7 +24,7 @@ def test_tiny_xgboost_regression(n_targets):
         "n_estimators": 100,
         "early_stopping_rounds": 10,
         "learning_rate": 0.3,
-        "base_score": 1.0,
+        "base_score": 0.5,
         "tree_method": "exact",
         "reg_lambda": 1,
         "min_child_weight": 1,
@@ -57,10 +56,10 @@ def test_tiny_xgboost_multi_output_regression(multi_strategy):
         "n_estimators": 400,
         "early_stopping_rounds": 20,
         "learning_rate": 0.3,
-        "base_score": 1.0,
+        "base_score": 0.5,
         "tree_method": "exact",
         "reg_lambda": 1.0,
-        "min_child_weight": 0,
+        "min_child_weight": 1,
         "multi_strategy": multi_strategy,
     }
 
