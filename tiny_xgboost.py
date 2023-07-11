@@ -1,8 +1,7 @@
 """Tiny xgboost implementation in Python & numpy.
-
-Currently only supports reg:squarederror objective.
 """
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -272,6 +271,11 @@ class SquaredError:
 _objectives = {"reg:squarederror": SquaredError}
 
 
+class MultiStrategy(str, Enum):
+    one_output_per_tree = "one_output_per_tree"
+    multi_output_tree = "multi_output_tree"
+
+
 @dataclass
 class XGBParams:
     objective: str = "reg:squarederror"
@@ -284,13 +288,13 @@ class XGBParams:
     base_score: float = 0.5
     min_child_weight: float = 1.0
     tree_method: str = "exact"
-    multi_strategy: str = "one_output_per_tree"
+    multi_strategy: str = MultiStrategy.one_output_per_tree
     num_outputs: int = 1
 
     def __post_init__(self):
         assert self.objective in _objectives.keys()
         assert self.tree_method == "exact"
-        assert self.multi_strategy in ("one_output_per_tree", "multi_output_tree")
+        assert self.multi_strategy in MultiStrategy._member_names_
 
 
 def reshape_2d(x):
@@ -330,15 +334,15 @@ class Booster:
             y_val.shape, self._params.base_score, dtype="float64"
         )
 
-        if self._params.multi_strategy == "one_output_per_tree":
-            self.trees = [[] for ii in range(self.num_outputs)]
-        else:
+        if self._params.multi_strategy == MultiStrategy.multi_output_tree:
             self.trees = [[]]
+        else:
+            self.trees = [[] for _ in range(self.num_outputs)]
 
         for ii in range(self._params.n_estimators):
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
 
-            if self._params.multi_strategy == "multi_output_tree":
+            if self._params.multi_strategy == MultiStrategy.multi_output_tree:
                 tree = MultiOutputTree()
                 tree.boost(X=X, grad=grad, hess=hess, params=self._params)
                 self.trees[0].append(tree)
@@ -389,7 +393,7 @@ class Booster:
             else:
                 iteration_range = (0, len(self.trees))
 
-        if self._params.multi_strategy == "multi_output_tree":
+        if self._params.multi_strategy == MultiStrategy.multi_output_tree:
             predictions = self._predict_tree(
                 X=X, iteration_range=iteration_range, tree_id=0
             )
