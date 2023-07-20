@@ -74,7 +74,8 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
             left_ids=left_ids,
             right_ids=right_ids,
         )
-    
+
+
 def find_best_split_two_parameter(*, X, grad, hess, lambd, gamma, min_child_weight):
     grad_sum = np.sum(grad)
     hess_sum = np.sum(hess)
@@ -322,7 +323,7 @@ class SquaredError:
 
     def loss(self, y, preds):
         return np.sqrt(np.mean(np.square(y - preds)))  # RMSE for consistency with xgb
-    
+
 
 class NormalDistribution:
     """Normal distribution with log scoring
@@ -338,7 +339,7 @@ class NormalDistribution:
 
     d/da -log[f(x)] = e^(-2b) * (x-a)       = (x-a) / var
     d/db -log[f(x)] = 1 - e^(-2b) * (x-a)^2 = 1 - (x-a)^2 / var
-    
+
     to second order:
 
     d2/da2     -log[f(x)] = -e^(-2b)                = -1 / var
@@ -346,6 +347,7 @@ class NormalDistribution:
     d2/db2     -log[f(x)] = -2 * e^(-2b) * (x-a)^2  = -2 * (x-a)^2 / var
     d/db d/da  -log[f(x)] = -2 * e^(-2b) * (x-a)    = -2 * (x-a)   / var
     """
+
     def gradient_and_hessian(self, y, preds):
 
         loc, log_scale = preds[:, 1], preds[:, 0]
@@ -359,18 +361,20 @@ class NormalDistribution:
         hess[:, 0, 0] = -1 / var
         hess[:, 0, 1] = -2 * (loc - y) / var
         hess[:, 1, 0] = -2 * (loc - y) / var
-        hess[:, 1, 1] = -2 * ((loc - y) **2) / var
+        hess[:, 1, 1] = -2 * ((loc - y) ** 2) / var
 
         return grad, hess
-    
+
     def loss(self, y, preds):
         loc, log_scale = preds[:, 1], preds[:, 0]
         scale = np.exp(log_scale)
         return -norm.logpdf(y, loc=loc, scale=scale)
 
 
-
-_objectives = {"reg:squarederror": SquaredError, "distribution:normal": NormalDistribution}
+_objectives = {
+    "reg:squarederror": SquaredError,
+    "distribution:normal": NormalDistribution,
+}
 
 
 class MultiStrategy(str, Enum):
