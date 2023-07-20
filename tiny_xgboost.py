@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from scipy.stats import norm
+
 
 # The 'official' xgboost fudge factor
 # https://github.com/dmlc/xgboost/blob/master/include/xgboost/base.h#L315
@@ -20,6 +22,60 @@ class SplitPoint:
 
 
 def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
+    grad_sum = np.sum(grad)
+    hess_sum = np.sum(hess)
+
+    best_gain = 0.0
+
+    for feature_id in range(X.shape[1]):
+        f_unique_sorted, idx = np.unique(X[:, feature_id], return_inverse=True)
+
+        # we first sum grads over identical feature vals
+        grad_unique = np.bincount(idx, grad.ravel())
+        hess_unique = np.bincount(idx, hess.ravel())
+        # then do a cumsum to allow for fast finding of best split point
+        grad_left_cumsum = np.cumsum(grad_unique, axis=0)
+        hess_left_cumsum = np.cumsum(hess_unique, axis=0)
+        grad_right_cumsum = grad_sum - grad_left_cumsum
+        hess_right_cumsum = hess_sum - hess_left_cumsum
+
+        all_split_gains = (
+            np.square(grad_left_cumsum) / (hess_left_cumsum + lambd)
+            + np.square(grad_right_cumsum) / (hess_right_cumsum + lambd)
+            - np.square(grad_sum) / (hess_sum + lambd)
+            - gamma
+        )
+
+        # Null out any gains that would results in leaves below min_child_weight
+        below_min_child_weight = (hess_left_cumsum < min_child_weight) | (
+            hess_right_cumsum < min_child_weight
+        )
+        all_split_gains[below_min_child_weight] = 0.0
+
+        split_id = all_split_gains.argmax()
+        current_gain = all_split_gains[split_id]
+
+        if current_gain > best_gain:
+            best_gain = current_gain
+            best_feature_id = feature_id
+            # XGB seems to put the split midway between points
+            best_val = np.mean(f_unique_sorted[split_id : split_id + 2])
+            below_split = X[:, feature_id] < best_val
+            left_ids = np.flatnonzero(below_split)
+            right_ids = np.flatnonzero(~below_split)
+
+    if best_gain <= KRT_EPS:
+        return None  # stop if we can't find a good split
+    else:
+        return SplitPoint(
+            gain=best_gain,
+            feature_id=best_feature_id,
+            feature_value=best_val,
+            left_ids=left_ids,
+            right_ids=right_ids,
+        )
+    
+def find_best_split_two_parameter(*, X, grad, hess, lambd, gamma, min_child_weight):
     grad_sum = np.sum(grad)
     hess_sum = np.sum(hess)
 
@@ -266,6 +322,52 @@ class SquaredError:
 
     def loss(self, y, preds):
         return np.sqrt(np.mean(np.square(y - preds)))  # RMSE for consistency with xgb
+    
+
+class NormalDistribution:
+    """Normal distribution with log scoring
+
+    f(x) = exp( -[ (x-mean) / std ]^2 / 2 ) / std
+
+    We reparameterize:
+
+        a = mean         |  a = mean
+        b = log ( std )  |  e^b = std   |  e^(2b) = var
+
+    The gradients are:
+
+    d/da -log[f(x)] = e^(-2b) * (x-a)       = (x-a) / var
+    d/db -log[f(x)] = 1 - e^(-2b) * (x-a)^2 = 1 - (x-a)^2 / var
+    
+    to second order:
+
+    d2/da2     -log[f(x)] = -e^(-2b)                = -1 / var
+    d/da d/db  -log[f(x)] = -2 * e^(-2b) * (x-a)    = -2 * (x-a)   / var
+    d2/db2     -log[f(x)] = -2 * e^(-2b) * (x-a)^2  = -2 * (x-a)^2 / var
+    d/db d/da  -log[f(x)] = -2 * e^(-2b) * (x-a)    = -2 * (x-a)   / var
+    """
+    def gradient_and_hessian(self, y, preds):
+
+        loc, log_scale = preds[:, 1], preds[:, 0]
+        var = np.exp(2 * log_scale)
+
+        grad = np.zeros(shape=(len(y), 2), dtype="float64")
+        grad[:, 0] = (loc - y) / var
+        grad[:, 1] = 1 - ((y - loc) ** 2) / var
+
+        hess = np.zeros(shape=(len(y), 2, 2), dtype="float64")
+        hess[:, 0, 0] = -1 / var
+        hess[:, 0, 1] = -2 * (loc - y) / var
+        hess[:, 1, 0] = -2 * (loc - y) / var
+        hess[:, 1, 1] = -2 * ((loc - y) **2) / var
+
+        return grad, hess
+    
+    def loss(self, y, preds):
+        loc, log_scale = preds[:, 1], preds[:, 0]
+        scale = np.exp(log_scale)
+        return -norm.logpdf(y, loc=loc, scale=scale)
+
 
 
 _objectives = {"reg:squarederror": SquaredError}
