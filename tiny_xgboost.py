@@ -370,7 +370,7 @@ class NormalDistribution:
 
 
 
-_objectives = {"reg:squarederror": SquaredError}
+_objectives = {"reg:squarederror": SquaredError, "distribution:normal": NormalDistribution}
 
 
 class MultiStrategy(str, Enum):
