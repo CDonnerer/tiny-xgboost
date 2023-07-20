@@ -76,36 +76,67 @@ def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
         )
 
 
-def find_best_split_two_parameter(*, X, grad, hess, lambd, gamma, min_child_weight):
-    grad_sum = np.sum(grad)
-    hess_sum = np.sum(hess)
+def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight):
+    grad_sum = np.sum(grad, axis=0)
+    hess_sum = np.sum(hess, axis=0)
 
     best_gain = 0.0
 
     for feature_id in range(X.shape[1]):
         f_unique_sorted, idx = np.unique(X[:, feature_id], return_inverse=True)
-
+    
         # we first sum grads over identical feature vals
-        grad_unique = np.bincount(idx, grad.ravel())
-        hess_unique = np.bincount(idx, hess.ravel())
+        grad_unique = np.zeros(shape=(f_unique_sorted.shape[0], 2))
+        grad_unique[:, 0] = np.bincount(idx, grad[:, 0].ravel())
+        grad_unique[:, 1] = np.bincount(idx, grad[:, 1].ravel())
+
+        hess_unique = np.zeros(shape=(f_unique_sorted.shape[0], 2, 2))
+        hess_unique[:, 0, 0] = np.bincount(idx, hess[:, 0, 0].ravel())
+        hess_unique[:, 0, 1] = np.bincount(idx, hess[:, 0, 1].ravel())
+        hess_unique[:, 1, 0] = np.bincount(idx, hess[:, 1, 0].ravel())
+        hess_unique[:, 1, 1] = np.bincount(idx, hess[:, 1, 1].ravel())
+
+        breakpoint()
         # then do a cumsum to allow for fast finding of best split point
         grad_left_cumsum = np.cumsum(grad_unique, axis=0)
         hess_left_cumsum = np.cumsum(hess_unique, axis=0)
         grad_right_cumsum = grad_sum - grad_left_cumsum
         hess_right_cumsum = hess_sum - hess_left_cumsum
 
+        def objective_term(grad, hess):
+            """(
+                (lambda + hess_11) * grad_0 ^ 2  
+                + (lambda + hess_00) * grad_1 ^ 2 
+                - 2 * hess_01 * grad_0 * grad_1 
+            ) / (
+                (lambda + hess_00) * (lambda * hess_11) - hess_01 ^ 2
+            )
+            """
+            numerator = (
+                ((lambd + hess[:, 1, 1]) * np.square(grad[:, 0])) +
+                ((lambd + hess[:, 0, 0]) * np.square(grad[:, 1])) -
+                (2 * hess[:, 0, 1] * grad[:, 0] * grad[:, 1])
+            )
+            denominator = (
+                (lambd + hess[:, 0, 0]) * (lambd + hess[:, 1, 1]) - np.square(hess[:, 0, 1])
+            )
+            return numerator / denominator
+        
+
         all_split_gains = (
-            np.square(grad_left_cumsum) / (hess_left_cumsum + lambd)
-            + np.square(grad_right_cumsum) / (hess_right_cumsum + lambd)
-            - np.square(grad_sum) / (hess_sum + lambd)
+            objective_term(grad=grad_left_cumsum, hess=hess_left_cumsum)
+            + objective_term(grad=grad_right_cumsum, hess=hess_right_cumsum)
+            - objective_term(grad=grad_sum[np.newaxis, :], hess=hess_sum[np.newaxis, :])
             - gamma
         )
+        #breakpoint()
+
 
         # Null out any gains that would results in leaves below min_child_weight
-        below_min_child_weight = (hess_left_cumsum < min_child_weight) | (
-            hess_right_cumsum < min_child_weight
-        )
-        all_split_gains[below_min_child_weight] = 0.0
+        # below_min_child_weight = (hess_left_cumsum < min_child_weight) | (
+        #     hess_right_cumsum < min_child_weight
+        # )
+        # all_split_gains[below_min_child_weight] = 0.0
 
         split_id = all_split_gains.argmax()
         current_gain = all_split_gains[split_id]
@@ -247,7 +278,14 @@ class ScalarNode(BaseNode):
 
 
 class VectorNode(BaseNode):
-    def _find_best_split(self, X, grad, hess, params):
+    def __init__(self, split_method):
+        if split_method == "two_params":
+            self._find_best_split = self._find_best_split_two_params
+        else:
+            self._find_best_split = self._find_best_split_summed
+
+
+    def _find_best_split_summed(self, X, grad, hess, params):
         grad_output_mean = grad.mean(axis=1)
         hess_output_mean = hess.mean(axis=1)
 
@@ -255,6 +293,16 @@ class VectorNode(BaseNode):
             X=X,
             grad=grad_output_mean,
             hess=hess_output_mean,
+            lambd=params.reg_lambda,
+            gamma=params.gamma,
+            min_child_weight=params.min_child_weight,
+        )
+    
+    def _find_best_split_two_params(self, X, grad, hess, params):
+        return find_best_split_two_params(
+            X=X,
+            grad=grad,
+            hess=hess,
             lambd=params.reg_lambda,
             gamma=params.gamma,
             min_child_weight=params.min_child_weight,
@@ -311,8 +359,8 @@ class Tree(BaseTree):
 
 
 class MultiOutputTree(BaseTree):
-    def __init__(self):
-        self._root = VectorNode()
+    def __init__(self, split_method="two_params"):
+        self._root = VectorNode(split_method=split_method)
 
 
 class SquaredError:
@@ -350,18 +398,20 @@ class NormalDistribution:
 
     def gradient_and_hessian(self, y, preds):
 
+        y_flat = y.squeeze()
+
         loc, log_scale = preds[:, 1], preds[:, 0]
         var = np.exp(2 * log_scale)
 
         grad = np.zeros(shape=(len(y), 2), dtype="float64")
-        grad[:, 0] = (loc - y) / var
-        grad[:, 1] = 1 - ((y - loc) ** 2) / var
+        grad[:, 0] = (loc - y_flat) / var
+        grad[:, 1] = 1 - ((loc - y_flat) ** 2) / var
 
         hess = np.zeros(shape=(len(y), 2, 2), dtype="float64")
         hess[:, 0, 0] = -1 / var
-        hess[:, 0, 1] = -2 * (loc - y) / var
-        hess[:, 1, 0] = -2 * (loc - y) / var
-        hess[:, 1, 1] = -2 * ((loc - y) ** 2) / var
+        hess[:, 0, 1] = -2 * (loc - y_flat) / var
+        hess[:, 1, 0] = -2 * (loc - y_flat) / var
+        hess[:, 1, 1] = -2 * ((loc - y_flat) ** 2) / var
 
         return grad, hess
 
@@ -395,7 +445,7 @@ class XGBParams:
     min_child_weight: float = 1.0
     tree_method: str = "exact"
     multi_strategy: str = MultiStrategy.one_output_per_tree
-    num_outputs: int = 1
+    num_outputs: int = None
 
     def __post_init__(self):
         assert self.objective in _objectives.keys()
@@ -432,12 +482,15 @@ class Booster:
         y = reshape_2d(y)
         y_val = reshape_2d(y_val)
 
-        self.num_outputs = y.shape[1]
+        if self._params.num_outputs:
+            self.num_outputs = self._params.num_outputs
+        else:
+            self.num_outputs = y.shape[1]
 
-        predictions = np.full(y.shape, self._params.base_score, dtype="float64")
+        predictions = np.full((y.shape[0], self.num_outputs), self._params.base_score, dtype="float64")
         # TODO: this will break if no eval_set is provided
         eval_predictions = np.full(
-            y_val.shape, self._params.base_score, dtype="float64"
+            (y_val.shape[0], self.num_outputs), self._params.base_score, dtype="float64"
         )
 
         if self._params.multi_strategy == MultiStrategy.multi_output_tree:
