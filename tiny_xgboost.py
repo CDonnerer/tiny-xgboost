@@ -373,7 +373,7 @@ class NormalDistribution:
 
 _objectives = {
     "reg:squarederror": SquaredError,
-    "distribution:normal": NormalDistribution,
+    "dist:normal": NormalDistribution,
 }
 
 
