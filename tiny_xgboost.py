@@ -11,6 +11,13 @@ from scipy.stats import norm
 # https://github.com/dmlc/xgboost/blob/master/include/xgboost/base.h#L315
 KRT_EPS = np.float64(1e-6)
 
+MIN_EXPONENT = np.log(np.float64(1e-32))
+MAX_EXPONENT = np.log(np.finfo("float64").max) - 1
+# Note: due to reparameterization, we need to ensure that the converted
+# variance, exp(2 * std), is within bounds of np.float32 arrays
+MIN_LOG_SCALE = MIN_EXPONENT / 2
+MAX_LOG_SCALE = MAX_EXPONENT / 2
+
 
 @dataclass
 class SplitPoint:
@@ -84,7 +91,7 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
 
     for feature_id in range(X.shape[1]):
         f_unique_sorted, idx = np.unique(X[:, feature_id], return_inverse=True)
-    
+
         # we first sum grads over identical feature vals
         grad_unique = np.zeros(shape=(f_unique_sorted.shape[0], 2))
         grad_unique[:, 0] = np.bincount(idx, grad[:, 0].ravel())
@@ -96,7 +103,6 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
         hess_unique[:, 1, 0] = np.bincount(idx, hess[:, 1, 0].ravel())
         hess_unique[:, 1, 1] = np.bincount(idx, hess[:, 1, 1].ravel())
 
-        breakpoint()
         # then do a cumsum to allow for fast finding of best split point
         grad_left_cumsum = np.cumsum(grad_unique, axis=0)
         hess_left_cumsum = np.cumsum(hess_unique, axis=0)
@@ -105,23 +111,22 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
 
         def objective_term(grad, hess):
             """(
-                (lambda + hess_11) * grad_0 ^ 2  
-                + (lambda + hess_00) * grad_1 ^ 2 
-                - 2 * hess_01 * grad_0 * grad_1 
+                (lambda + hess_11) * grad_0 ^ 2
+                + (lambda + hess_00) * grad_1 ^ 2
+                - 2 * hess_01 * grad_0 * grad_1
             ) / (
                 (lambda + hess_00) * (lambda * hess_11) - hess_01 ^ 2
             )
             """
             numerator = (
-                ((lambd + hess[:, 1, 1]) * np.square(grad[:, 0])) +
-                ((lambd + hess[:, 0, 0]) * np.square(grad[:, 1])) -
-                (2 * hess[:, 0, 1] * grad[:, 0] * grad[:, 1])
+                ((lambd + hess[:, 1, 1]) * np.square(grad[:, 0]))
+                + ((lambd + hess[:, 0, 0]) * np.square(grad[:, 1]))
+                - (2 * hess[:, 0, 1] * grad[:, 0] * grad[:, 1])
             )
-            denominator = (
-                (lambd + hess[:, 0, 0]) * (lambd + hess[:, 1, 1]) - np.square(hess[:, 0, 1])
+            denominator = (lambd + hess[:, 0, 0]) * (lambd + hess[:, 1, 1]) - np.square(
+                hess[:, 0, 1]
             )
-            return numerator / denominator
-        
+            return -numerator / denominator
 
         all_split_gains = (
             objective_term(grad=grad_left_cumsum, hess=hess_left_cumsum)
@@ -129,8 +134,7 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
             - objective_term(grad=grad_sum[np.newaxis, :], hess=hess_sum[np.newaxis, :])
             - gamma
         )
-        #breakpoint()
-
+        # breakpoint()
 
         # Null out any gains that would results in leaves below min_child_weight
         # below_min_child_weight = (hess_left_cumsum < min_child_weight) | (
@@ -278,12 +282,15 @@ class ScalarNode(BaseNode):
 
 
 class VectorNode(BaseNode):
-    def __init__(self, split_method):
-        if split_method == "two_params":
+    def __init__(self, split_method="two_params"):
+        super().__init__()
+        self._split_method = split_method
+        if self._split_method == "two_params":
             self._find_best_split = self._find_best_split_two_params
+            self._set_leaf_node = self._set_leaf_node_two_params
         else:
             self._find_best_split = self._find_best_split_summed
-
+            self._set_leaf_node = self._set_leaf_node_summed
 
     def _find_best_split_summed(self, X, grad, hess, params):
         grad_output_mean = grad.mean(axis=1)
@@ -297,7 +304,7 @@ class VectorNode(BaseNode):
             gamma=params.gamma,
             min_child_weight=params.min_child_weight,
         )
-    
+
     def _find_best_split_two_params(self, X, grad, hess, params):
         return find_best_split_two_params(
             X=X,
@@ -308,7 +315,7 @@ class VectorNode(BaseNode):
             min_child_weight=params.min_child_weight,
         )
 
-    def _set_leaf_node(self, grad, hess, params):
+    def _set_leaf_node_summed(self, grad, hess, params):
         self.is_leaf = True
         self.cover = len(grad)
 
@@ -319,6 +326,38 @@ class VectorNode(BaseNode):
             weights.append(leaf_weight)
 
         self.weight = params.learning_rate * np.array(weights).reshape(-1, 1)
+
+    def _set_leaf_node_two_params(self, grad, hess, params):
+        """
+        1 / (
+            (lambda + hess_00) * (lambda + hess_11) - hess_01 ^ 2
+        ) * [
+            (hess_01 * grad_1) - (lambda + hess_11) * grad_0,
+            (hess_01 * grad_0) - (lambda + hess_00) * grad_1,
+        ]
+
+        """
+        self.is_leaf = True
+        self.cover = len(grad)
+
+        grad_0 = np.sum(grad[:, 0])
+        grad_1 = np.sum(grad[:, 1])
+
+        hess_00 = np.sum(hess[:, 0, 0])
+        hess_01 = np.sum(hess[:, 0, 1])
+        hess_11 = np.sum(hess[:, 1, 1])
+
+        scale = 1 / (
+            (params.reg_lambda + hess_00) * (params.reg_lambda + hess_11)
+            - np.square(hess_01)
+        )
+        weights = scale * np.array(
+            [
+                ((hess_01 * grad_1) - (params.reg_lambda + hess_00) * grad_0),
+                ((hess_01 * grad_0) - (params.reg_lambda + hess_11) * grad_1),
+            ]
+        )
+        self.weight = params.learning_rate * weights.reshape(-1, 1)
 
     def predict(self, X):
         if self.is_leaf:
@@ -376,49 +415,52 @@ class SquaredError:
 class NormalDistribution:
     """Normal distribution with log scoring
 
-    f(x) = exp( -[ (x-mean) / std ]^2 / 2 ) / std
+    f(x) = exp( -[ (y - mean) / std ]^2 / 2 ) / std
 
     We reparameterize:
 
         a = mean         |  a = mean
-        b = log ( std )  |  e^b = std   |  e^(2b) = var
+        b = log ( std )  |  e^b = std   |  e^(2b) = var  | e^(-2b) = 1 / var
 
     The gradients are:
 
-    d/da -log[f(x)] = e^(-2b) * (x-a)       = (x-a) / var
-    d/db -log[f(x)] = 1 - e^(-2b) * (x-a)^2 = 1 - (x-a)^2 / var
+    d/da -log[f(y)] = - e^(-2b) * (y-a)      = (a-y) / var
+    d/db -log[f(y)] = 1 - e^(-2b) * (y-a)^2  = 1 - (y-a)^2 / var
 
     to second order:
 
-    d2/da2     -log[f(x)] = -e^(-2b)                = -1 / var
-    d/da d/db  -log[f(x)] = -2 * e^(-2b) * (x-a)    = -2 * (x-a)   / var
-    d2/db2     -log[f(x)] = -2 * e^(-2b) * (x-a)^2  = -2 * (x-a)^2 / var
-    d/db d/da  -log[f(x)] = -2 * e^(-2b) * (x-a)    = -2 * (x-a)   / var
+    d2/da2     -log[f(y)] = e^(-2b)                = 1 / var
+    d/da d/db  -log[f(y)] =  2 * e^(-2b) * (y-a)   = 2 * (y-a)   / var
+    d2/db2     -log[f(y)] = -2 * e^(-2b) * (x-a)^2 = 2 * (y-a)^2 / var
+    d/db d/da  -log[f(y)] = -2 * e^(-2b) * (x-a)   = 2 * (y-a)   / var
     """
 
     def gradient_and_hessian(self, y, preds):
 
         y_flat = y.squeeze()
 
-        loc, log_scale = preds[:, 1], preds[:, 0]
+        loc = preds[:, 0]
+        log_scale = np.clip(preds[:, 1], a_min=MIN_LOG_SCALE, a_max=MAX_LOG_SCALE)
+
         var = np.exp(2 * log_scale)
 
         grad = np.zeros(shape=(len(y), 2), dtype="float64")
         grad[:, 0] = (loc - y_flat) / var
-        grad[:, 1] = 1 - ((loc - y_flat) ** 2) / var
+        grad[:, 1] = 1 - ((y_flat - loc) ** 2) / var
 
         hess = np.zeros(shape=(len(y), 2, 2), dtype="float64")
-        hess[:, 0, 0] = -1 / var
-        hess[:, 0, 1] = -2 * (loc - y_flat) / var
-        hess[:, 1, 0] = -2 * (loc - y_flat) / var
-        hess[:, 1, 1] = -2 * ((loc - y_flat) ** 2) / var
+        hess[:, 0, 0] = 1 / var
+        hess[:, 0, 1] = 2 * (y_flat - loc) / var
+        hess[:, 1, 0] = 2 * (y_flat - loc) / var
+        hess[:, 1, 1] = 2 * ((y_flat - loc) ** 2) / var
 
         return grad, hess
 
     def loss(self, y, preds):
-        loc, log_scale = preds[:, 1], preds[:, 0]
+        loc = preds[:, 0]
+        log_scale = np.clip(preds[:, 1], a_min=MIN_LOG_SCALE, a_max=MAX_LOG_SCALE)
         scale = np.exp(log_scale)
-        return -norm.logpdf(y, loc=loc, scale=scale)
+        return -norm.logpdf(y, loc=loc, scale=scale).mean()
 
 
 _objectives = {
@@ -487,7 +529,9 @@ class Booster:
         else:
             self.num_outputs = y.shape[1]
 
-        predictions = np.full((y.shape[0], self.num_outputs), self._params.base_score, dtype="float64")
+        predictions = np.full(
+            (y.shape[0], self.num_outputs), self._params.base_score, dtype="float64"
+        )
         # TODO: this will break if no eval_set is provided
         eval_predictions = np.full(
             (y_val.shape[0], self.num_outputs), self._params.base_score, dtype="float64"
