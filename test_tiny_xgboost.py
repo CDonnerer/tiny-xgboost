@@ -65,3 +65,41 @@ def test_tiny_xgboost_multi_output_regression(multi_strategy):
 
     txgb = TinyXGBRegressor(**learner_params)
     txgb.fit(X_train, y_train, eval_set=(X_test, y_test), verbose=True)
+
+
+def small_X_y_data(n_samples=5_000):
+    """Small set of X, y data (single feature)"""
+
+    def true_function(X):
+        return np.sin(3 * X)
+
+    def true_noise_scale(X):
+        return np.abs(np.cos(X))
+
+    np.random.seed(1234)
+    n_samples = n_samples
+    X = np.random.uniform(-2, -1, n_samples)
+    y = true_function(X) + np.random.normal(scale=true_noise_scale(X), size=n_samples)
+
+    return X[..., np.newaxis], y
+
+
+def test_normal_distribution():
+    X, y = small_X_y_data()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+
+    model = TinyXGBRegressor(
+        objective="distribution:normal",
+        max_depth=2,
+        n_estimators=20,
+        early_stopping_rounds=5,
+        learning_rate=0.01,
+    )
+    model.fit(
+        X_train,
+        y_train,
+        eval_set=(X_test, y_test),
+        verbose=False,
+    )
+    model.predict(X_test)
+    
