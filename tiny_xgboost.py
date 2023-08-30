@@ -1,6 +1,6 @@
 """Tiny xgboost implementation in Python & numpy.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from enum import Enum
 
 import numpy as np
@@ -26,6 +26,18 @@ class SplitPoint:
     feature_value: float = None
     left_ids: np.ndarray = None
     right_ids: np.ndarray = None
+    all_feature_values : np.ndarray = None
+    all_gains : np.ndarray = None
+    all_obj_left : np.ndarray = None
+    all_obj_right : np.ndarray = None
+    all_obj_left_num : np.ndarray = None
+    all_obj_right_num : np.ndarray = None
+    all_obj_left_denom : np.ndarray = None
+    all_obj_right_denom : np.ndarray = None
+    all_grads_left_cumsum : np.ndarray = None
+    all_grads_right_cumsum : np.ndarray = None
+    all_hess_left_cumsum : np.ndarray = None
+    all_hess_right_cumsum : np.ndarray = None
 
 
 def find_best_split(*, X, grad, hess, lambd, gamma, min_child_weight):
@@ -130,12 +142,22 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
             denominator = (lambd + hess[:, 0, 0]) * (lambd + hess[:, 1, 1]) - (
                 hess[:, 0, 1] * hess[:, 1, 0]
             )
-            return numerator / denominator
+            return numerator / denominator, numerator, denominator
+        
+        obj_left, obj_left_num, obj_left_denom = objective_term(
+            grad=grad_left_cumsum, hess=hess_left_cumsum
+        )
+        obj_right, obj_right_num, obj_right_denom = objective_term(
+            grad=grad_right_cumsum, hess=hess_right_cumsum
+        )
+        pre_split_obj, _ ,_  = objective_term(
+            grad=grad_sum[np.newaxis, :], hess=hess_sum[np.newaxis, :]
+        )
 
         all_split_gains = (
-            objective_term(grad=grad_left_cumsum, hess=hess_left_cumsum)
-            + objective_term(grad=grad_right_cumsum, hess=hess_right_cumsum)
-            - objective_term(grad=grad_sum[np.newaxis, :], hess=hess_sum[np.newaxis, :])
+            obj_left
+            + obj_right 
+            - pre_split_obj
             - gamma
         )
 
@@ -153,6 +175,23 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
         if current_gain > best_gain:
             best_gain = current_gain
             best_feature_id = feature_id
+            best_feature_vals = f_unique_sorted
+            best_feature_gains = all_split_gains
+            best_obj_left = obj_left
+            best_obj_right = obj_right
+
+            best_obj_left_num = obj_left_num
+            best_obj_left_denom = obj_left_denom
+
+            best_obj_right_num = obj_right_num
+            best_obj_right_denom = obj_right_denom
+
+            best_grad_left_cumsum = grad_left_cumsum
+            best_grad_right_cumsum = grad_right_cumsum
+
+            best_hess_left_cumsum = hess_left_cumsum
+            best_hess_right_cumsum = hess_right_cumsum
+
             # XGB seems to put the split midway between points
             best_val = np.mean(f_unique_sorted[split_id : split_id + 2])
             below_split = X[:, feature_id] < best_val
@@ -168,6 +207,18 @@ def find_best_split_two_params(*, X, grad, hess, lambd, gamma, min_child_weight)
             feature_value=best_val,
             left_ids=left_ids,
             right_ids=right_ids,
+            all_feature_values=best_feature_vals,
+            all_gains=best_feature_gains,
+            all_obj_left=best_obj_left,
+            all_obj_right=best_obj_right,
+            all_obj_left_num=best_obj_left_num,
+            all_obj_right_num=best_obj_right_num,
+            all_obj_left_denom=best_obj_left_denom,
+            all_obj_right_denom=best_obj_right_denom,
+            all_grads_left_cumsum=best_grad_left_cumsum,
+            all_grads_right_cumsum=best_grad_right_cumsum,
+            all_hess_left_cumsum=best_hess_left_cumsum,
+            all_hess_right_cumsum=best_hess_right_cumsum,
         )
 
 
@@ -186,7 +237,7 @@ class BaseNode:
         self.left_child = None
         self.right_child = None
 
-    def split(self, *, X, grad, hess, depth, params):
+    def split(self, *, X, grad, hess, depth, params, debug):
         if depth == params.max_depth:
             self._set_leaf_node(grad=grad, hess=hess, params=params)
             return
@@ -195,7 +246,7 @@ class BaseNode:
             X=X,
             grad=grad,
             hess=hess,
-            params=params,
+            params=params, 
         )
 
         if split_point is None:
@@ -204,6 +255,7 @@ class BaseNode:
             return
 
         else:
+            debug[f"depth_{depth}"] = asdict(split_point)
             self.split_point = split_point
             self.cover = len(grad)
 
@@ -214,6 +266,7 @@ class BaseNode:
                 hess=hess[self.split_point.left_ids],
                 depth=depth + 1,
                 params=params,
+                debug=debug
             )
 
             self.right_child = self.__class__(self.tree_method)
@@ -223,6 +276,7 @@ class BaseNode:
                 hess=hess[self.split_point.right_ids],
                 depth=depth + 1,
                 params=params,
+                debug=debug
             )
 
     def _find_best_split(self, X, grad, hess, params):
@@ -388,7 +442,9 @@ class BaseTree:
         self._root = None
 
     def boost(self, *, X, grad, hess, params):
-        self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params)
+        debug = {}
+        self._root.split(X=X, grad=grad, hess=hess, depth=0, params=params, debug=debug)
+        return debug
 
     def predict(self, X):
         return self._root.predict(X)
@@ -454,11 +510,9 @@ class NormalDistribution:
 
         hess = np.zeros(shape=(len(y), 2, 2), dtype="float64")
         hess[:, 0, 0] = 1 / var
-        # TODO: hack to take half of the diagonal elements
-        hess[:, 0, 1] = 0.5 * 2 * (y_flat - loc) / var
+        hess[:, 0, 1] = 2 * (y_flat - loc) / var
         hess[:, 1, 0] = hess[:, 0, 1]  # because symmetry
         hess[:, 1, 1] = 2 * ((y_flat - loc) ** 2) / var
-
         return grad, hess
 
     def loss(self, y, preds):
@@ -529,6 +583,9 @@ class Booster:
         self.objective = _objectives[self._params.objective]()
 
     def fit(self, X, y, *, eval_set=None, verbose=True):
+
+        fit_tracker = {}
+
         # TODO: only set those if eval loss
         self.best_val_loss = np.finfo("float64").max
         self.best_iteration = None
@@ -556,12 +613,17 @@ class Booster:
             self.trees = [[] for _ in range(self.num_outputs)]
 
         for ii in range(self._params.n_estimators):
+            fit_tracker[ii] = {}
+
             grad, hess = self.objective.gradient_and_hessian(y, predictions)
+            fit_tracker[ii].update({"grad": grad, "hess": hess})
 
             if self._params.multi_strategy == MultiStrategy.multi_output_tree:
                 tree = MultiOutputTree(tree_method=self._params.tree_method)
-                tree.boost(X=X, grad=grad, hess=hess, params=self._params)
+                split_log = tree.boost(X=X, grad=grad, hess=hess, params=self._params)
                 self.trees[0].append(tree)
+                fit_tracker[ii].update({"splits": split_log})
+
             else:
                 for jj in range(self.num_outputs):
                     tree = Tree()
@@ -596,8 +658,8 @@ class Booster:
             if (ii - self.best_iteration) >= self._params.early_stopping_rounds:
                 break
 
-        return self
-
+        return self, fit_tracker
+        
     def predict(
         self, X, iteration_range=None, output_margin=False, strict_shape=False
     ):
@@ -649,11 +711,14 @@ class TinyXGBRegressor:
         self.params = XGBParams(**params)
         self.objective = _objectives[self.params.objective]()
 
-    def fit(self, X, y, *, eval_set=None, verbose=True):
-        self._Booster = Booster(self.params).fit(
+    def fit(self, X, y, *, eval_set=None, verbose=True, debug=False):
+        self._Booster, fit_tracker = Booster(self.params).fit(
             X, y, eval_set=eval_set, verbose=verbose
         )
-        return self
+        if debug:
+            return self, fit_tracker
+        else:
+            return self
 
     def predict(self, *args, **kwargs):
         return self._Booster.predict(*args, **kwargs)
