@@ -639,14 +639,14 @@ class Booster:
                 strict_shape=True,
             )
 
-            train_loss = self.objective.loss(y, predictions)
+            train_loss = self.objective.loss(y.squeeze(), predictions)
             eval_predictions += self.predict(
                 X_val,
                 iteration_range=(ii, ii + 1),
                 output_margin=True,
                 strict_shape=True,
             )
-            val_loss = self.objective.loss(y_val, eval_predictions)
+            val_loss = self.objective.loss(y_val.squeeze(), eval_predictions)
 
             if verbose:
                 print(f"[{ii}]\ttrain-loss={train_loss:.5f}, val-loss={val_loss:.5f}")
